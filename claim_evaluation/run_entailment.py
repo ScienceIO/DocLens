@@ -65,6 +65,11 @@ if __name__ == "__main__":
     parser.add_argument('--prompt_file', required=True, help='filename of the prompt dict .json.')
     parser.add_argument("--azure", action="store_true", default=False, help="Azure openai API")
     parser.add_argument("--max_new_tokens", type=int, default=2000, help="Max number of new tokens to generate in one step")
+
+    parser.add_argument("--model", type=str, default='gpt-4o-2024-08-06', help="see https://platform.openai.com/docs/models/gpt-4o")
+
+    parser.add_argument("--api_key", type=str)
+    parser.add_argument("--org_id", type=str)
     
     args = parser.parse_args()
     
@@ -73,15 +78,17 @@ if __name__ == "__main__":
     # API setup 
     if args.azure:
         openai.api_base = os.environ.get("OPENAI_API_BASE")
-        openai.api_key = os.environ.get("OPENAI_API_KEY")
+        openai.api_key = args.api_key
+        openai.organization = args.org_id
         openai.api_type = "azure"
         openai.api_version = "2023-05-15"
-        EVALUATOR_NAME = EVALUATOR_DEPLOY_NAME = "gpt-4-1106-preview" 
+        EVALUATOR_NAME = EVALUATOR_DEPLOY_NAME = args.model
         # EVALUATOR_NAME = EVALUATOR_DEPLOY_NAME = "gpt-35-turbo"
     else:
         openai.api_base = "https://api.openai.com/v1"
-        openai.api_key = os.environ.get("OPENAI_API_KEY")
-        EVALUATOR_NAME = "gpt-4-1106-preview"
+        openai.api_key = args.api_key
+        openai.organization = args.org_id
+        EVALUATOR_NAME = args.model
     
     if mode == 'claim_recall':
         savefile = result_file.replace('.json', '.claim_scores')

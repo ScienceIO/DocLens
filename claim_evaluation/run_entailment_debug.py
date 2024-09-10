@@ -4,13 +4,14 @@ import json
 import time
 from tqdm import tqdm
 from copy import deepcopy
-import numpy as np
-import re
 import openai
 import openai.error
 import traceback
+import re
+
 
 SECTION_DIVISIONS = ['subjective', 'objective_exam', 'objective_results', 'assessment_and_plan']
+error_count = 0  # Global error counter
 
 def remove_citations(sent):
     return re.sub(r"\[\d+", "", re.sub(r" \[\d+", "", sent)).replace(" |", "").replace("]", "")
@@ -18,16 +19,13 @@ def remove_citations(sent):
 def completion_with_backoff(debug=False, **kwargs):
     is_ok = False
     retry_count = 0
-    debug_info_path = "debug_info.json"  # Path for debug file logging retries and errors
     while not is_ok:
         retry_count += 1
         try:
-            response = openai.ChatCompletion.create(**kwargs)
+            response = openai.ChatCompletion.create(temperature=0, **kwargs)
             is_ok = True
         except openai.error.RateLimitError as error:
             if retry_count <= 30:
-                if retry_count % 10 == 0:
-                    print(f"OpenAI API retry for {retry_count} times ({error})")
                 time.sleep(10)
                 continue
             else:
@@ -36,7 +34,6 @@ def completion_with_backoff(debug=False, **kwargs):
         except openai.error.InvalidRequestError as error:
             if 'maximum context length' in error._message:
                 if retry_count <= 3:
-                    print(f"reduce max_tokens by 500")
                     kwargs['max_tokens'] = kwargs['max_tokens'] - 500
                     continue
                 else:
@@ -50,18 +47,26 @@ def completion_with_backoff(debug=False, **kwargs):
             return {}
     return response
 
+
 def debug_log(message, debug=False):
     if debug:
-        print(f"DEBUG: {message}")
-        with open("debug_log.txt", "a") as f:
+        log_path = os.path.abspath("debug_log.txt")
+        with open(log_path, "a") as f:
             f.write(f"{message}\n")
 
 def log_error(message, local_vars, debug=False):
+    global error_count
     if debug:
-        error_message = f"ERROR: {message}\nLocal Variables:\n{json.dumps(local_vars, indent=4, default=str)}"
-        print(error_message)
-        with open("error_log.txt", "a") as f:
-            f.write(error_message + "\n")
+        error_count += 1  # Increment the error counter
+        error_log_path = os.path.abspath("error_log.txt")
+        separator = "====================="
+        error_message = (
+            f"{separator}\nError number {error_count}:\n"
+            f"ERROR: {message}\nLocal Variables:\n{json.dumps(local_vars, indent=4, default=str)}\n"
+        )
+        with open(error_log_path, "a") as f:
+            f.write(f"{error_message}\n")
+        print(f"ERROR: {message}. Details saved to {error_log_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -74,7 +79,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_new_tokens", type=int, default=2000, help="Max number of new tokens to generate in one step")
     parser.add_argument("--model", type=str, default='gpt-4o-2024-08-06', help="see https://platform.openai.com/docs/models/gpt-4o")
     parser.add_argument("--api_key", type=str)
-    parser.add_argument("--org_id", type:str)
+    parser.add_argument("--org_id", type=str)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 
     args = parser.parse_args()
@@ -92,13 +97,15 @@ if __name__ == "__main__":
         openai.organization = args.org_id
         EVALUATOR_NAME = args.model
 
-    savefile = args.result_file.replace('.json', f'.{args.mode}_scores')
+    savefile = os.path.abspath(args.result_file.replace('.json', f'.{args.mode}_scores'))
+    print(f"Results will be saved to: {savefile}")
 
     if not args.use_persection_claims:
         SECTION_DIVISIONS = ['full']
 
     output_data = json.load(open(args.result_file, 'r'))
-    debug_log(f"Loaded {len(output_data)} entries from {args.result_file}. Saving scores to {savefile.split('/')[-1]}.", args.debug)
+    if args.debug:
+        debug_log(f"Loaded {len(output_data)} entries from {args.result_file}.", args.debug)
 
     if os.path.exists(savefile):
         claims_score = json.load(open(savefile))
@@ -166,10 +173,16 @@ if __name__ == "__main__":
             new_generation_count += 1
 
             try:
-                judgment_dict = json.loads(response['choices'][0]['message']['content'])
+                to_load = response['choices'][0]['message']['content']
+                if to_load.startswith("```json"):
+                    to_load = to_load[7:]  # Removes the "```json\n" part
+                if to_load.endswith("```"):
+                    to_load = to_load[:-3]  # Removes the ending "```"
+                judgment_dict = json.loads(to_load)
                 claims_score[section][eid_str] = judgment_dict
                 for cid, d in enumerate(claims_score[section][eid_str]):
                     debug_log(f"Claim {cid}: {d['claim']} -> Prediction: {d['entailment_prediction']}", args.debug)
+                print('Success')
             except Exception as e:
                 log_error(f'CANNOT CONVERT TO JSON: {str(e)}', locals(), args.debug)
                 if args.debug:
@@ -178,9 +191,10 @@ if __name__ == "__main__":
                 wrong_format_count += 1
 
             if new_generation_count % 5 == 0:
-                debug_log('Saving results..', args.debug)
+                debug_log('Saving intermediate results..', args.debug)
                 json.dump(claims_score, open(savefile, 'w'), indent=4, sort_keys=True)
 
     json.dump(claims_score, open(savefile, 'w'), indent=4, sort_keys=True)
 
-    debug_log(f"Total wrong format count: {wrong_format_count}", args.debug)
+    if args.debug:
+        debug_log(f"Total wrong format count: {wrong_format_count}", args.debug)

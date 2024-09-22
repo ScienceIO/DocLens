@@ -101,8 +101,8 @@ if __name__ == "__main__":
             if eval_model != 'TRUE':
                 score_file_claim_same = result_file.replace('.json', '.same_scores') 
         else:
-            score_file_claim_recall = result_file.replace('.json', '.claim_min1max90.claim_scores')
-            score_file_claim_precision = result_file.replace('.json', '.output_claim_min1max90.output_claim_scores')
+            score_file_claim_recall = result_file.replace('.json', '.claim_min1max90.claim_recall_scores')
+            score_file_claim_precision = result_file.replace('.json', '.output_claim_min1max90.claim_precision_scores')
             
         score_file_citations = result_file.replace('.json', '.citations.score')
         

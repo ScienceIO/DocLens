@@ -221,7 +221,7 @@ if __name__ == "__main__":
                     print(f"{judgment_dict['entailment_prediction']} {judgment_dict['explanation']}")
                 else:
                     claims_score[section][eid_str] = judgment_dict
-                    for cid, d in enumerate(claims_score[section][eid_str]):
+                    for cid, d in enumerate(claims_score[section][eid_str].values()):
                         print(f"{d['entailment_prediction']} Claim {cid}: {d['claim']}")
             except:
                 print('CANNOT CONVERT TO JSON')

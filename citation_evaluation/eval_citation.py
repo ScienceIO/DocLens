@@ -196,8 +196,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_new_tokens", type=int, default=2000, help="Max number of new tokens to generate in one step")
     parser.add_argument("--model", type=str, default='gpt-4o-2024-08-06', help="see https://platform.openai.com/docs/models/gpt-4o")
 
-    parser.add_argument("--api_key", type=str)
-    parser.add_argument("--org_id", type=str)
+    # parser.add_argument("--api_key", type=str)
+    # parser.add_argument("--org_id", type=str)
     parser.add_argument("--debug", action="store_true", default=False, help="If set, save prompts sent to OpenAI API to a debug file.")
 
     args = parser.parse_args()
@@ -218,8 +218,8 @@ if __name__ == "__main__":
             print("API key or Organization ID not provided.")
             sys.exit(1)
         openai.api_base = "https://api.openai.com/v1"
-        openai.api_key = args.api_key
-        openai.organization = args.org_id
+        openai.api_key = os.environ.get("OPENAI_API_KEY")
+        openai.organization = os.environ.get("OPENAI_ORG_ID")
 
         EVALUATOR_NAME = args.model
 

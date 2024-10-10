@@ -8,8 +8,8 @@ DATASET_NAME=${5:-user_dataset}
 python citation_evaluation/eval_citation.py --result_file results/${SAVENAME}.json \
     --dataset_name $DATASET_NAME --split_method citation \
     --prompt_file $PROMPT_FILE \
-    --org_id $ORG_ID \
-    --api_key $API_KEY \
+    # --org_id $ORG_ID \
+    # --api_key $API_KEY \
     --debug
 
 python aggregate_scores.py --result_file results/${SAVENAME}.json --dataset_name $DATASET_NAME \

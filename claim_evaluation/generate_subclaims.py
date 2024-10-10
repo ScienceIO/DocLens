@@ -67,8 +67,8 @@ if __name__ == "__main__" :
 
     parser.add_argument("--model", type=str, default='gpt-4o-2024-08-06', help="see https://platform.openai.com/docs/models/gpt-4o")
 
-    parser.add_argument("--api_key", type=str)
-    parser.add_argument("--org_id", type=str)
+    # parser.add_argument("--api_key", type=str)
+    # parser.add_argument("--org_id", type=str)
     
     args = parser.parse_args()
     
@@ -83,8 +83,8 @@ if __name__ == "__main__" :
         # CLAIM_EXTRACTOR_NAME = CLAIM_EXTRACTOR_DEPLOY_NAME = "gpt-35-turbo"
     else:
         openai.api_base = "https://api.openai.com/v1"
-        openai.api_key = args.api_key
-        openai.organization = args.org_id
+        openai.api_key = os.environ.get("OPENAI_API_KEY")
+        openai.organization = os.environ.get("OPENAI_ORG_ID")
 
         CLAIM_EXTRACTOR_NAME = args.model
     

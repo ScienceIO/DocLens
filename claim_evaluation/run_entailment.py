@@ -4,107 +4,178 @@ import json
 import time
 from tqdm import tqdm
 from copy import deepcopy
-import numpy as np
-import re
-
 import openai
 import openai.error
+import traceback
+import re
 
 
 SECTION_DIVISIONS = ['subjective', 'objective_exam', 'objective_results', 'assessment_and_plan']
+error_count = 0  # Global error counter
+
+max_retries = 21  # Set a maximum number of retries
+max_temperature = 1.0  # Max temperature to cap retries
+
 
 def remove_citations(sent):
     return re.sub(r"\[\d+", "", re.sub(r" \[\d+", "", sent)).replace(" |", "").replace("]", "")
 
-def completion_with_backoff(**kwargs):
+def completion_with_backoff(debug=False, temperature=0.0, **kwargs):
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "entailment_response",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "entailments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "claim": {
+                                    "type": "string"
+                                },
+                                "entailment_prediction": {
+                                    "type": "integer"
+                                },
+                                "explanation": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["claim", "entailment_prediction", "explanation"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["entailments"],
+                "additionalProperties": False
+            }
+        }
+    }
     is_ok = False
     retry_count = 0
-    while not is_ok:
+    max_retries = 21  # You can increase this value as needed
+    timeout_seconds = 60  # Adjust the timeout duration for each request
+    
+    while not is_ok and retry_count < max_retries:
         retry_count += 1
         try:
-            response = openai.ChatCompletion.create(**kwargs)
+            response = openai.ChatCompletion.create(
+                temperature=temperature,
+                # response_format={"type": "json_object"},
+                response_format = response_format,
+                timeout=timeout_seconds,  # Set a shorter timeout for the API request
+                **kwargs
+            )
             is_ok = True
-        except openai.error.RateLimitError as error:
-            if retry_count <= 30:
-                if retry_count % 10 == 0:
-                    print(f"OpenAI API retry for {retry_count} times ({error})")
+        except openai.error.Timeout as error:
+            print(f"Request timed out on attempt {retry_count}/{max_retries}. Retrying...")
+            if retry_count >= max_retries:
+                log_error("Request timed out after max retries.", locals(), debug)
+                return {}
+            time.sleep(10)  # Backoff time before retrying
+        except openai.error.RateLimitError:
+            if retry_count <= max_retries:
                 time.sleep(10)
                 continue
             else:
+                log_error("Rate limit exceeded", locals(), debug)
                 return {}
         except openai.error.InvalidRequestError as error:
             if 'maximum context length' in error._message:
                 if retry_count <= 3:
-                    print(f"reduce max_tokens by 500")
                     kwargs['max_tokens'] = kwargs['max_tokens'] - 500
                     continue
                 else:
-                    print(error)
+                    log_error("Invalid request error", locals(), debug)
                     return {}
             else:
-                print(error)
+                log_error("API error", locals(), debug)
                 return {}
         except Exception as error:
-            print(error)
+            log_error("Unexpected error", locals(), debug)
             return {}
+    
     return response
 
 
+def debug_log(message, debug=False):
+    if debug:
+        log_path = os.path.abspath("debug_log.txt")
+        with open(log_path, "a") as f:
+            f.write(f"{message}\n")
+
+
+def log_error(message, local_vars, debug=False):
+    global error_count
+    if debug:
+        error_count += 1  # Increment the error counter
+        error_log_path = os.path.abspath("error_log.txt")
+        separator = "====================="
+        
+        # Remove 'output_data' from local_vars if it exists
+        if 'output_data' in local_vars:
+            local_vars = {k: v for k, v in local_vars.items() if k != 'output_data'}
+        
+        # Capture the stack trace
+        stack_trace = traceback.format_exc()
+        
+        # Build the error message
+        error_message = (
+            f"{separator}\nError number {error_count}:\n"
+            f"ERROR: {message}\n"
+            f"Stack Trace:\n{stack_trace}\n"
+            f"Local Variables:\n{json.dumps(local_vars, indent=4, default=str)}\n"
+        )
+        
+        with open(error_log_path, "a") as f:
+            f.write(f"{error_message}\n")
+        print(f"ERROR: {message}. Details saved to {error_log_path}")
+
+
 if __name__ == "__main__":
-    
     parser = argparse.ArgumentParser()
-    # data
     parser.add_argument('--result_file', required=True, help='filename of the system-generated outputs.')
     parser.add_argument("--dataset_name", type=str, default=None, help="Name of the dataset")
-    
-    # evaluation setting
     parser.add_argument("--mode", type=str, default="claim_recall", choices=['claim_recall','claim_precision','same'])
     parser.add_argument("--use_persection_claims", action="store_true", default=False, help="Generate claims for each section")
-    
-    # evaluation model
     parser.add_argument('--prompt_file', required=True, help='filename of the prompt dict .json.')
     parser.add_argument("--azure", action="store_true", default=False, help="Azure openai API")
-    parser.add_argument("--max_new_tokens", type=int, default=2000, help="Max number of new tokens to generate in one step")
-    
-    args = parser.parse_args()
-    
-    result_file, dataset_name, mode, prompt_file, max_new_tokens = args.result_file, args.dataset_name, args.mode, args.prompt_file, args.max_new_tokens
+    parser.add_argument("--max_new_tokens", type=int, default=4000, help="Max number of new tokens to generate in one step")
+    parser.add_argument("--model", type=str, default='gpt-4o-2024-08-06', help="see https://platform.openai.com/docs/models/gpt-4o")
+    parser.add_argument("--api_key", type=str)
+    parser.add_argument("--org_id", type=str)
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--prompt_debug", action="store_true", default=False, help="Enable debug mode")
 
-    # API setup 
+    args = parser.parse_args()
+
     if args.azure:
         openai.api_base = os.environ.get("OPENAI_API_BASE")
-        openai.api_key = os.environ.get("OPENAI_API_KEY")
+        openai.api_key = args.api_key
+        openai.organization = args.org_id
         openai.api_type = "azure"
         openai.api_version = "2023-05-15"
-        EVALUATOR_NAME = EVALUATOR_DEPLOY_NAME = "gpt-4-1106-preview" 
-        # EVALUATOR_NAME = EVALUATOR_DEPLOY_NAME = "gpt-35-turbo"
+        EVALUATOR_NAME = EVALUATOR_DEPLOY_NAME = args.model
     else:
         openai.api_base = "https://api.openai.com/v1"
-        openai.api_key = os.environ.get("OPENAI_API_KEY")
-        EVALUATOR_NAME = "gpt-4-1106-preview"
-    
-    if mode == 'claim_recall':
-        savefile = result_file.replace('.json', '.claim_scores')
-    elif mode == 'claim_precision':
-        savefile = result_file.replace('.json', '.output_claim_scores')
-    elif mode == 'same':
-        # For MeQSum, since the output only contains one line, we check:
-        # (1) whether the output question is a specification of the reference question
-        # (2) whether the reference question is a specification of the output question
-        # (3) whether the two questions are essentially the same
-        assert dataset_name == 'meqsum'
-        savefile = result_file.replace('.json', '.same_scores')
-        
+        openai.api_key = args.api_key
+        openai.organization = args.org_id
+        EVALUATOR_NAME = args.model
+
+    savefile = os.path.abspath(args.result_file.replace('.json', f'.{args.mode}_scores'))
+    print(f"Results will be saved to: {savefile}")
+
     if not args.use_persection_claims:
         SECTION_DIVISIONS = ['full']
-    
-    output_data = json.load(open(result_file, 'r')) # a list of dicts
-    
-    print( f"Saving scores to {savefile.split('/')[-1]}..") # {section: {eid_str: [{"claim": "", "entailment_prediction": 0 or 1}, ...]} }
-    
-    
+
+    output_data = json.load(open(args.result_file, 'r'))
+    if args.debug:
+        debug_log(f"Loaded {len(output_data)} entries from {args.result_file}.", args.debug)
+
     if os.path.exists(savefile):
-        print('Save file exist!')
         claims_score = json.load(open(savefile))
     else:
         claims_score = {}
@@ -114,8 +185,8 @@ if __name__ == "__main__":
                 eid_str = str(x['example_id'])
                 claims_score[section][eid_str] = []
 
-    prompt_template = json.load(open(prompt_file, 'r'))
-    for i in range(1,len(prompt_template)-1):
+    prompt_template = json.load(open(args.prompt_file, 'r'))
+    for i in range(1, len(prompt_template)-1):
         prompt_template[i]['content'] = json.dumps(prompt_template[i]['content'])
 
     TEXT_NAME = {
@@ -127,106 +198,106 @@ if __name__ == "__main__":
     new_generation_count = 0
     for section in SECTION_DIVISIONS:
         if args.mode == 'claim_recall':
-            if dataset_name == 'meqsum':
-                text_key = 'output'
-                subclaim_key = 'reference'
-            else:
-                if args.use_persection_claims:
-                    text_key = f'output_{section}'
-                    subclaim_key = f'subclaims_reference_{section}'
-                else:
-                    text_key = 'output'
-                    subclaim_key = 'subclaims_reference'
-                
+            text_key = 'output' if args.dataset_name != 'meqsum' else 'reference'
+            subclaim_key = 'subclaims_reference'
         elif args.mode == 'claim_precision':
-            if dataset_name == 'meqsum':
-                text_key = 'reference'
-                subclaim_key = 'output'
-            else:
-                if args.use_persection_claims:
-                    text_key = f'reference_{section}'
-                    subclaim_key = f'subclaims_output_{section}'
-                else:
-                    text_key = 'reference'
-                    subclaim_key = 'subclaims_output'
-                
-        elif args.mode == 'same':
+            # text_key = 'reference' if args.dataset_name != 'meqsum' else 'output'
             text_key = 'output'
-            subclaim_key = 'reference'
-            
-        text_name = TEXT_NAME[dataset_name] if dataset_name in TEXT_NAME else "clinical_report"
-        
+            subclaim_key = 'subclaims_output'
+        elif args.mode == 'same':
+            text_key, subclaim_key = 'output', 'reference'
+
+        text_name = TEXT_NAME.get(args.dataset_name, "clinical_report")
+
         for item in output_data:
             eid_str = str(item['example_id'])
-            text = remove_citations(item[text_key])
-            
-            if dataset_name == 'meqsum':
-                claims = [item[subclaim_key]]
-            else:
-                claims = item[subclaim_key]
-                
-                if len(claims) == 0:
-                    # skip empty claims
-                    claims_score[section][eid_str] = []
-                    continue
-                
-                if len(text) == 0:
-                    # score is 0 for all claims
-                    claims_score[section][eid_str] = [{"claim": claim, "entailment_prediction":0 } for claim in claims]
-                    continue 
-            
-            # claim style = jsonexp_2shot
+            try:
+                text = remove_citations(item[text_key])
+            except KeyError as e:
+                log_error(f"KeyError for item ID {eid_str}: {str(e)}", locals(), args.debug)
+                continue
+
+            claims = item.get(subclaim_key, [])
+
+            if len(claims) == 0:
+                claims_score[section][eid_str] = []
+                continue
+
+            if len(text) == 0:
+                claims_score[section][eid_str] = [{"claim": claim, "entailment_prediction": 0} for claim in claims]
+                continue
+
             if len(claims_score[section][eid_str]) == len(claims):
                 continue
-                
-            print('Do not exist:', section, eid_str)
+
             prompt = deepcopy(prompt_template)
-            
-            if dataset_name == 'meqsum':
-                prompt[-1]['content'] = json.dumps({
-                    "question A": text,
-                    "question B": item[subclaim_key]
-                })
-            else:
-                prompt[-1]['content'] = json.dumps({
-                    text_name: text,
-                    "claims": claims
-                })
-                    
-            if args.azure:
-                response = completion_with_backoff(
-                    engine=EVALUATOR_DEPLOY_NAME, model=EVALUATOR_NAME, messages=prompt, max_tokens=max_new_tokens
-                )
-            else:
-                response = completion_with_backoff(
-                    model=EVALUATOR_NAME, messages=prompt, max_tokens=max_new_tokens
-                )
-            
-            new_generation_count += 1
-            
-            try:
-                judgment_dict = json.loads(response['choices'][0]['message']['content'])
-                if dataset_name == 'meqsum':
-                    judgment_dict['entailment_prediction'] = judgment_dict['prediction']
-                    claims_score[section][eid_str] = [judgment_dict]
-                    print(f"question A: {text}")
-                    print(f"question B: {claims[0]}")
-                    print(f"{judgment_dict['entailment_prediction']} {judgment_dict['explanation']}")
-                else:
+            prompt[-1]['content'] = json.dumps({text_name: text, "claims": claims})
+
+            if args.prompt_debug:
+                with open(f"debug_prompts_{new_generation_count}.json", "w") as f:
+                    json.dump(prompt, f, indent=4)
+
+
+            retry_attempts = 0
+            success = False
+
+            initial_temperature = 0.0
+            while retry_attempts < max_retries and not success:
+                try:
+                    # Call the API with the current temperature
+                    response = completion_with_backoff(debug=args.debug, temperature=initial_temperature, model=EVALUATOR_NAME, messages=prompt, max_tokens=args.max_new_tokens)
+                    # In case it fails, start with a high enough temperature so that the outcomes will be different
+                    initial_temperature = 0.5
+                    new_generation_count += 1
+
+                    to_load = response['choices'][0]['message']['content']
+
+                    if to_load.startswith("```json"):
+                        to_load = to_load[7:]  # Removes the "```json\n" part
+                    if to_load.endswith("```"):
+                        to_load = to_load[:-3]  # Removes the ending "```"
+
+                    judgment_dict = json.loads(to_load)
+                    judgment_dict = judgment_dict['entailments']
+                    if isinstance(judgment_dict, dict):
+                        judgment_dict = [judgment_dict]
+
                     claims_score[section][eid_str] = judgment_dict
                     for cid, d in enumerate(claims_score[section][eid_str]):
                         print(f"{d['entailment_prediction']} Claim {cid}: {d['claim']}")
-            except:
-                print('CANNOT CONVERT TO JSON')
-                print(response)
-                wrong_format_count += 1
-            
+                        debug_log(f"Claim {cid}: {d['claim']} -> Prediction: {d['entailment_prediction']}", args.debug)
+                    success = True  # Set success to True to break out of retry loop
+                    #Reset the temperature for the next step
+                    initial_temperature = 0.0
+                    print('Success')
+                except Exception as e:
+                    # Increment retry count and temperature for the next retry
+                    retry_attempts += 1
+                    initial_temperature = min(initial_temperature + 0.1, max_temperature)  # Increment temperature by 0.1
+                    print(f"Retrying with temperature: {initial_temperature}")
+
+                    if retry_attempts >= max_retries:
+                        # Log error only if all attempts have failed
+                        log_error(f'CANNOT CONVERT TO JSON after {max_retries} attempts: {str(e)}', locals(), args.debug)
+                        #Reset the temperature for the next step
+                        initial_temperature = 0.0
+                        break
+
+            if success and args.debug and retry_attempts % 21 == 0:
+                with open(f"debug_response_{new_generation_count}.json", "w") as f:
+                    json.dump(response, f, indent=4)
+
+            # Saving intermediate results
             if new_generation_count % 5 == 0:
-                # save every 5 steps
-                print('Saving results..')
+                debug_log('Saving intermediate results..', args.debug)
                 json.dump(claims_score, open(savefile, 'w'), indent=4, sort_keys=True)
-        
-    json.dump(claims_score, open(savefile, 'w'), indent=4, sort_keys=True)
-    
-    print(f"WRONG FORMAT COUNT: {wrong_format_count}")
-    
+
+        json.dump(claims_score, open(savefile, 'w'), indent=4, sort_keys=True)
+
+
+    if args.debug:
+        debug_log(f"Total wrong format count: {wrong_format_count}", args.debug)
+
+
+
+
